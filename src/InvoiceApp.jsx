@@ -91,15 +91,21 @@ function formatDateUK(iso) {
   return `${dd}/${mm}/${d.getFullYear()}`;
 }
 
+function buildXeroDescription(inv) {
+  const parts = [];
+  if (inv.descriptionHeading) parts.push(`Re: ${inv.descriptionHeading}`);
+  if (inv.descriptionBody) parts.push(inv.descriptionBody);
+  return parts.join("\n") || "Works carried out";
+}
+
 function invoiceToXeroRows(inv, { accountCode, taxTypeMap }) {
   const contactName = inv.toCompany || inv.toName || "";
   const reference = inv.jobNo || inv.quoteNo || "";
   const invoiceDate = formatDateUK(inv.invoiceDate);
   const taxType = taxTypeMap[String(inv.vatRate)] || taxTypeMap["20"];
+  const description = buildXeroDescription(inv);
   const lines = (inv.lineItems || []).filter((li) => li.amount !== "" && li.amount != null);
-  const rowsSource = lines.length
-    ? lines
-    : [{ label: inv.descriptionHeading || "Works carried out", amount: 0 }];
+  const rowsSource = lines.length ? lines : [{ amount: 0 }];
 
   return rowsSource.map((li) => ({
     "*ContactName": contactName,
@@ -118,7 +124,7 @@ function invoiceToXeroRows(inv, { accountCode, taxTypeMap }) {
     "*DueDate": invoiceDate,
     Total: "",
     InventoryItemCode: "",
-    "*Description": li.label || inv.descriptionHeading || "Works carried out",
+    "*Description": description,
     "*Quantity": 1,
     "*UnitAmount": Number(li.amount || 0).toFixed(2),
     Discount: "",
