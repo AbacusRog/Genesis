@@ -49,6 +49,13 @@ Same process as your other apps:
 - **PDF** — the PDF button (on a list row, or inside an invoice) opens
   the print-formatted invoice and triggers your browser's print dialog.
   Choose **Save as PDF** as the destination.
+- **Export to Xero** — visible only when signed in as
+  `roger@abacusconsultancy.co.uk`. Filter by invoice number range or date
+  range, tick which invoices to include, adjust the sales account code
+  and tax type names if needed, then download a CSV in Xero's sales
+  invoice import format (mapped from `SalesInvoiceTemplateXero.csv`).
+  Double-check the tax type names match your Xero organisation's tax
+  rates exactly before importing.
 - **Sign out** — top-right of the header.
 
 ## Notes

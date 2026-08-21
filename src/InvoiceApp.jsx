@@ -34,6 +34,125 @@ function vatRateLabel(vatRate) {
   return isReverseCharge(vatRate) ? "20% (Reverse Charge)" : `${vatRateNumber(vatRate)}%`;
 }
 
+const XERO_EXPORT_ALLOWED_EMAIL = "roger@abacusconsultancy.co.uk";
+
+const XERO_HEADERS = [
+  "*ContactName",
+  "EmailAddress",
+  "POAddressLine1",
+  "POAddressLine2",
+  "POAddressLine3",
+  "POAddressLine4",
+  "POCity",
+  "PORegion",
+  "POPostalCode",
+  "POCountry",
+  "*InvoiceNumber",
+  "Reference",
+  "*InvoiceDate",
+  "*DueDate",
+  "Total",
+  "InventoryItemCode",
+  "*Description",
+  "*Quantity",
+  "*UnitAmount",
+  "Discount",
+  "*AccountCode",
+  "*TaxType",
+  "TaxAmount",
+  "TrackingName1",
+  "TrackingOption1",
+  "TrackingName2",
+  "TrackingOption2",
+  "Currency",
+  "BrandingTheme",
+];
+
+const DEFAULT_TAX_TYPE_MAP = {
+  "20": "20% (VAT on Income)",
+  "20RC": "Reverse Charge Income",
+  "0": "Zero Rated Income",
+};
+
+function csvEscape(value) {
+  const s = value === undefined || value === null ? "" : String(value);
+  if (/[",\n\r]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function formatDateUK(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+function invoiceToXeroRows(inv, { accountCode, taxTypeMap }) {
+  const contactName = inv.toCompany || inv.toName || "";
+  const reference = inv.jobNo || inv.quoteNo || "";
+  const invoiceDate = formatDateUK(inv.invoiceDate);
+  const taxType = taxTypeMap[String(inv.vatRate)] || taxTypeMap["20"];
+  const lines = (inv.lineItems || []).filter((li) => li.amount !== "" && li.amount != null);
+  const rowsSource = lines.length
+    ? lines
+    : [{ label: inv.descriptionHeading || "Works carried out", amount: 0 }];
+
+  return rowsSource.map((li) => ({
+    "*ContactName": contactName,
+    EmailAddress: inv.toEmail || "",
+    POAddressLine1: inv.siteAddressLine1 || "",
+    POAddressLine2: inv.siteAddressLine2 || "",
+    POAddressLine3: "",
+    POAddressLine4: "",
+    POCity: "",
+    PORegion: "",
+    POPostalCode: inv.sitePostcode || "",
+    POCountry: "",
+    "*InvoiceNumber": `GI/${inv.invoiceNumber}`,
+    Reference: reference,
+    "*InvoiceDate": invoiceDate,
+    "*DueDate": invoiceDate,
+    Total: "",
+    InventoryItemCode: "",
+    "*Description": li.label || inv.descriptionHeading || "Works carried out",
+    "*Quantity": 1,
+    "*UnitAmount": Number(li.amount || 0).toFixed(2),
+    Discount: "",
+    "*AccountCode": accountCode,
+    "*TaxType": taxType,
+    TaxAmount: "",
+    TrackingName1: "",
+    TrackingOption1: "",
+    TrackingName2: "",
+    TrackingOption2: "",
+    Currency: "",
+    BrandingTheme: "",
+  }));
+}
+
+function buildXeroCsv(invoices, options) {
+  const rows = invoices.flatMap((inv) => invoiceToXeroRows(inv, options));
+  const headerLine = XERO_HEADERS.map(csvEscape).join(",");
+  const bodyLines = rows.map((row) => XERO_HEADERS.map((h) => csvEscape(row[h])).join(","));
+  return [headerLine, ...bodyLines].join("\r\n");
+}
+
+function downloadCsv(csvText, filename) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -262,6 +381,9 @@ export default function InvoiceApp({ session }) {
     );
   }
 
+  const canExport =
+    (session?.user?.email || "").toLowerCase() === XERO_EXPORT_ALLOWED_EMAIL.toLowerCase();
+
   return (
     <div style={styles.app}>
       <style>{PRINT_CSS}</style>
@@ -269,6 +391,8 @@ export default function InvoiceApp({ session }) {
         <TopBar
           view={view}
           onList={() => setView("list")}
+          onExport={() => setView("export")}
+          canExport={canExport}
           saveState={saveState}
           userEmail={session?.user?.email}
         />
@@ -285,6 +409,10 @@ export default function InvoiceApp({ session }) {
           netTotal={netTotal}
           grandTotal={grandTotal}
         />
+      )}
+
+      {view === "export" && canExport && (
+        <ExportScreen invoices={invoices} grandTotal={grandTotal} onBack={() => setView("list")} />
       )}
 
       {view === "edit" && current && (
@@ -320,7 +448,7 @@ export default function InvoiceApp({ session }) {
   );
 }
 
-function TopBar({ view, onList, saveState, userEmail }) {
+function TopBar({ view, onList, onExport, canExport, saveState, userEmail }) {
   return (
     <div style={styles.topbar} className="no-print">
       <div style={styles.brandRow}>
@@ -335,6 +463,11 @@ function TopBar({ view, onList, saveState, userEmail }) {
         {view !== "list" && (
           <button style={styles.ghostBtn} onClick={onList}>
             ← All invoices
+          </button>
+        )}
+        {canExport && view === "list" && (
+          <button style={styles.secondaryBtn} onClick={onExport}>
+            Export to Xero
           </button>
         )}
         {userEmail && <span style={styles.userTag}>{userEmail}</span>}
@@ -463,6 +596,198 @@ function Field({ label, children, width }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 5, width: width || "100%" }}>
       <label style={styles.label}>{label}</label>
       {children}
+    </div>
+  );
+}
+
+function ExportScreen({ invoices, grandTotal, onBack }) {
+  const [numFrom, setNumFrom] = useState("");
+  const [numTo, setNumTo] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [selected, setSelected] = useState(() => new Set());
+  const [accountCode, setAccountCode] = useState("200");
+  const [taxTypeMap, setTaxTypeMap] = useState(DEFAULT_TAX_TYPE_MAP);
+
+  const numValue = (inv) => {
+    const m = String(inv.invoiceNumber || "").match(/(\d+)/);
+    return m ? parseInt(m[1], 10) : NaN;
+  };
+
+  const filtered = invoices
+    .filter((inv) => {
+      if (numFrom !== "" && numValue(inv) < parseInt(numFrom, 10)) return false;
+      if (numTo !== "" && numValue(inv) > parseInt(numTo, 10)) return false;
+      if (dateFrom && inv.invoiceDate < dateFrom) return false;
+      if (dateTo && inv.invoiceDate > dateTo) return false;
+      return true;
+    })
+    .sort((a, b) => numValue(a) - numValue(b));
+
+  const allFilteredSelected = filtered.length > 0 && filtered.every((i) => selected.has(i.id));
+
+  const toggleOne = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleAllFiltered = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) {
+        filtered.forEach((i) => next.delete(i.id));
+      } else {
+        filtered.forEach((i) => next.add(i.id));
+      }
+      return next;
+    });
+  };
+
+  const selectedInvoices = invoices.filter((i) => selected.has(i.id));
+
+  const handleExport = () => {
+    if (selectedInvoices.length === 0) return;
+    const csv = buildXeroCsv(selectedInvoices, { accountCode, taxTypeMap });
+    const stamp = todayISO();
+    downloadCsv(csv, `Genesis_Xero_Export_${stamp}.csv`);
+  };
+
+  return (
+    <div style={styles.editorWrap}>
+      <div style={styles.editorHeaderRow}>
+        <h1 style={styles.h1}>Export to Xero</h1>
+        <button style={styles.ghostBtn} onClick={onBack}>
+          ← All invoices
+        </button>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Filter invoices</div>
+        <div style={styles.grid3}>
+          <Field label="Invoice number from">
+            <input
+              style={styles.input}
+              placeholder="e.g. 2631"
+              value={numFrom}
+              onChange={(e) => setNumFrom(e.target.value)}
+            />
+          </Field>
+          <Field label="Invoice number to">
+            <input
+              style={styles.input}
+              placeholder="e.g. 2650"
+              value={numTo}
+              onChange={(e) => setNumTo(e.target.value)}
+            />
+          </Field>
+          <div />
+          <Field label="Date from">
+            <input
+              type="date"
+              style={styles.input}
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+            />
+          </Field>
+          <Field label="Date to">
+            <input
+              type="date"
+              style={styles.input}
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+            />
+          </Field>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardTitle}>Xero field mapping</div>
+        <div style={styles.grid3}>
+          <Field label="Sales account code">
+            <input
+              style={styles.input}
+              value={accountCode}
+              onChange={(e) => setAccountCode(e.target.value)}
+            />
+          </Field>
+          <Field label="Tax type — 20%">
+            <input
+              style={styles.input}
+              value={taxTypeMap["20"]}
+              onChange={(e) => setTaxTypeMap((m) => ({ ...m, "20": e.target.value }))}
+            />
+          </Field>
+          <Field label="Tax type — 20%RC">
+            <input
+              style={styles.input}
+              value={taxTypeMap["20RC"]}
+              onChange={(e) => setTaxTypeMap((m) => ({ ...m, "20RC": e.target.value }))}
+            />
+          </Field>
+          <Field label="Tax type — 0%">
+            <input
+              style={styles.input}
+              value={taxTypeMap["0"]}
+              onChange={(e) => setTaxTypeMap((m) => ({ ...m, "0": e.target.value }))}
+            />
+          </Field>
+        </div>
+        <div style={styles.mutedNote}>
+          Check these tax type names match your Xero organisation's tax rates exactly before
+          importing — Xero import will reject rows with an unrecognised tax type.
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <div style={styles.cardHeaderRow}>
+          <div style={styles.cardTitle}>
+            Select invoices ({selected.size} of {filtered.length} selected)
+          </div>
+          <button style={styles.smallBtn} onClick={toggleAllFiltered}>
+            {allFilteredSelected ? "Deselect all" : "Select all"}
+          </button>
+        </div>
+
+        {filtered.length === 0 && (
+          <div style={styles.mutedNote}>No invoices match the current filters.</div>
+        )}
+
+        <div style={styles.tableWrap}>
+          {filtered.map((inv) => (
+            <label key={inv.id} style={styles.exportRow}>
+              <input
+                type="checkbox"
+                checked={selected.has(inv.id)}
+                onChange={() => toggleOne(inv.id)}
+              />
+              <div style={{ minWidth: 80, fontWeight: 700, color: "#1f2a44" }}>
+                GI/{inv.invoiceNumber}
+              </div>
+              <div style={{ flex: 1, fontSize: 13.5, color: "#1f2a44" }}>
+                {inv.toCompany || inv.toName || "—"}
+              </div>
+              <div style={{ width: 100, fontSize: 13, color: "#5b6472" }}>
+                {todayLong(inv.invoiceDate)}
+              </div>
+              <div style={{ width: 90, textAlign: "right", fontWeight: 700 }}>
+                £{formatMoney(grandTotal(inv))}
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <button
+        style={{ ...styles.primaryBtn, opacity: selectedInvoices.length ? 1 : 0.5 }}
+        disabled={selectedInvoices.length === 0}
+        onClick={handleExport}
+      >
+        Download CSV ({selectedInvoices.length} invoice{selectedInvoices.length === 1 ? "" : "s"})
+      </button>
     </div>
   );
 }
@@ -1051,6 +1376,24 @@ const styles = {
     textTransform: "uppercase",
     letterSpacing: 0.5,
     marginBottom: 14,
+  },
+  cardHeaderRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+  },
+  mutedNote: { fontSize: 12.5, color: "#8a93a3", marginTop: 10, lineHeight: 1.5 },
+  exportRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    background: "#f9fafb",
+    border: "1px solid #ecedf1",
+    borderRadius: 10,
+    padding: "10px 14px",
+    marginBottom: 7,
+    cursor: "pointer",
   },
   grid3: {
     display: "grid",
