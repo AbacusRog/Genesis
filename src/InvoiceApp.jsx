@@ -15,6 +15,25 @@ const COMPANY = {
 
 const SALES_PEOPLE = ["MARC", "TOM", "OFFICE"];
 
+const VAT_OPTIONS = [
+  { value: "20", label: "20%" },
+  { value: "20RC", label: "20%RC (Reverse charge)" },
+  { value: "0", label: "0%" },
+];
+
+const REVERSE_CHARGE_NOTE =
+  "Reverse charge: Customer to pay the VAT at the rates shown to HMRC";
+
+function vatRateNumber(vatRate) {
+  return vatRate === "0" ? 0 : 20; // both "20" and "20RC" are notionally 20%
+}
+function isReverseCharge(vatRate) {
+  return vatRate === "20RC";
+}
+function vatRateLabel(vatRate) {
+  return isReverseCharge(vatRate) ? "20% (Reverse Charge)" : `${vatRateNumber(vatRate)}%`;
+}
+
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -62,7 +81,7 @@ function blankInvoice(nextNumber) {
     descriptionHeading: "",
     descriptionBody: "",
     lineItems: [{ id: uid(), label: "", amount: "" }],
-    vatRate: 20,
+    vatRate: "20",
     status: "draft",
     createdAt: new Date().toISOString(),
     xeroStatus: "not_sent",
@@ -190,8 +209,12 @@ export default function InvoiceApp({ session }) {
 
   const netTotal = (inv) =>
     (inv?.lineItems || []).reduce((sum, li) => sum + (Number(li.amount) || 0), 0);
-  const vatAmount = (inv) => (netTotal(inv) * (Number(inv?.vatRate) || 0)) / 100;
-  const grandTotal = (inv) => netTotal(inv) + vatAmount(inv);
+  // Amount shown on the VAT line (informational under reverse charge).
+  const vatAmount = (inv) => (netTotal(inv) * vatRateNumber(String(inv?.vatRate))) / 100;
+  // Amount actually added to the total due — £0 under reverse charge, since
+  // the customer accounts for the VAT to HMRC directly.
+  const chargedVat = (inv) => (isReverseCharge(String(inv?.vatRate)) ? 0 : vatAmount(inv));
+  const grandTotal = (inv) => netTotal(inv) + chargedVat(inv);
 
   const updateField = (field, value) => setCurrent((c) => ({ ...c, [field]: value }));
 
@@ -653,17 +676,25 @@ function InvoiceEditor({
             <span>£{formatMoney(netTotal)}</span>
           </div>
           <div style={styles.totalsRow}>
-            <span>
-              VAT @{" "}
-              <input
-                style={styles.vatInput}
+            <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              VAT rate
+              <select
+                style={styles.vatSelect}
                 value={inv.vatRate}
                 onChange={(e) => updateField("vatRate", e.target.value)}
-              />
-              %
+              >
+                {VAT_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
             </span>
             <span>£{formatMoney(vatAmount)}</span>
           </div>
+          {isReverseCharge(String(inv.vatRate)) && (
+            <div style={styles.rcNote}>{REVERSE_CHARGE_NOTE}</div>
+          )}
           <div style={{ ...styles.totalsRow, ...styles.totalsRowFinal }}>
             <span>Total due</span>
             <span>£{formatMoney(grandTotal)}</span>
@@ -792,11 +823,17 @@ function PreviewScreen({ inv, netTotal, vatAmount, grandTotal, onBack, onPrint }
               <td style={styles.blankCell} />
               <td style={styles.totalLineCell}>
                 <div style={styles.totalLineRow}>
-                  <span>VAT @ {inv.vatRate}%</span>
+                  <span>VAT @ {vatRateLabel(String(inv.vatRate))}</span>
                   <span>£{formatMoney(vatAmount)}</span>
                 </div>
               </td>
             </tr>
+            {isReverseCharge(String(inv.vatRate)) && (
+              <tr>
+                <td style={styles.blankCell} />
+                <td style={styles.rcNoteCell}>{REVERSE_CHARGE_NOTE}</td>
+              </tr>
+            )}
             <tr>
               <td style={styles.blankCell} />
               <td style={styles.grandTotalCell}>
@@ -1133,6 +1170,30 @@ const styles = {
     textAlign: "center",
     fontSize: 13,
     outline: "none",
+  },
+  vatSelect: {
+    border: "1px solid #dfe3ea",
+    borderRadius: 7,
+    padding: "4px 8px",
+    fontSize: 12.5,
+    color: "#1f2a44",
+    outline: "none",
+    background: "#fff",
+  },
+  rcNote: {
+    fontSize: 12,
+    color: "#9a6b00",
+    background: "#fff8e6",
+    border: "1px solid #f2e2ad",
+    borderRadius: 7,
+    padding: "7px 10px",
+    marginTop: 2,
+  },
+  rcNoteCell: {
+    padding: "2px 12px 6px",
+    fontSize: 11.5,
+    fontStyle: "italic",
+    color: "#555",
   },
   previewOuter: { padding: "20px 0 60px" },
   previewToolbar: {
