@@ -93,8 +93,14 @@ function formatDateUK(iso) {
 
 function buildXeroDescription(inv) {
   const parts = [];
-  if (inv.descriptionHeading) parts.push(`Re: ${inv.descriptionHeading}`);
-  if (inv.descriptionBody) parts.push(inv.descriptionBody);
+  if (inv.descriptionHeading) parts.push(inv.descriptionHeading.trim());
+  if (inv.descriptionBody) {
+    const paragraphs = inv.descriptionBody
+      .split(/\n+/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    parts.push(...paragraphs);
+  }
   return parts.join("\n") || "Works carried out";
 }
 
