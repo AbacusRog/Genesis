@@ -101,7 +101,7 @@ function buildXeroDescription(inv) {
       .filter(Boolean);
     parts.push(...paragraphs);
   }
-  return parts.join("\n") || "Works carried out";
+  return parts.join(" ") || "Works carried out";
 }
 
 function invoiceToXeroRows(inv, { accountCode, taxTypeMap }) {
