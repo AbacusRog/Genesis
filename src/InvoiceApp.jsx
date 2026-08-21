@@ -216,6 +216,8 @@ function blankInvoice(nextNumber) {
     status: "draft",
     createdAt: new Date().toISOString(),
     xeroStatus: "not_sent",
+    downloaded: false,
+    downloadedAt: null,
   };
 }
 
@@ -269,6 +271,7 @@ export default function InvoiceApp({ session }) {
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState("idle"); // idle | saving | saved
   const [toast, setToast] = useState("");
+  const [bulkQueue, setBulkQueue] = useState(null); // { ids, index } while a bulk download is running
   const printRef = useRef(null);
 
   useEffect(() => {
@@ -367,17 +370,67 @@ export default function InvoiceApp({ session }) {
       lineItems: c.lineItems.length > 1 ? c.lineItems.filter((li) => li.id !== id) : c.lineItems,
     }));
 
-  const handlePrint = (inv) => {
+  const markDownloaded = async (inv) => {
+    if (inv.downloaded) return inv;
+    const updated = { ...inv, downloaded: true, downloadedAt: new Date().toISOString() };
+    const ok = await upsertInvoice(updated);
+    if (ok) {
+      setInvoices((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+      setCurrent((c) => (c && c.id === updated.id ? updated : c));
+    }
+    return ok ? updated : inv;
+  };
+
+  // Opens the print dialog for one invoice, then marks it downloaded once the
+  // browser's print/Save-as-PDF dialog closes (fires either way — printed or
+  // cancelled — which is the best signal available for "the PDF was handled").
+  const handlePrint = (inv, { onDone } = {}) => {
     const target = inv || current;
     setCurrent(target);
     setView("preview");
     const prevTitle = document.title;
     document.title = `Invoice GI-${target.invoiceNumber}`;
+
+    const onAfterPrint = async () => {
+      window.removeEventListener("afterprint", onAfterPrint);
+      document.title = prevTitle;
+      await markDownloaded(target);
+      if (onDone) onDone();
+    };
+    window.addEventListener("afterprint", onAfterPrint);
+
     setTimeout(() => {
       window.print();
-      setTimeout(() => (document.title = prevTitle), 500);
     }, 250);
   };
+
+  // Walks through a list of invoices one at a time, opening each one's print
+  // dialog in turn and advancing automatically once it closes.
+  const startBulkDownload = (invoicesToDownload) => {
+    if (!invoicesToDownload || invoicesToDownload.length === 0) return;
+    setBulkQueue({ ids: invoicesToDownload.map((i) => i.id), index: 0 });
+  };
+
+  useEffect(() => {
+    if (!bulkQueue) return;
+    if (bulkQueue.index >= bulkQueue.ids.length) {
+      const total = bulkQueue.ids.length;
+      setBulkQueue(null);
+      setView("list");
+      showToast(`Downloaded ${total} invoice${total === 1 ? "" : "s"}`);
+      return;
+    }
+    const inv = invoices.find((i) => i.id === bulkQueue.ids[bulkQueue.index]);
+    if (!inv) {
+      // Invoice no longer exists (e.g. deleted) — skip it.
+      setBulkQueue((q) => ({ ...q, index: q.index + 1 }));
+      return;
+    }
+    handlePrint(inv, {
+      onDone: () => setBulkQueue((q) => (q ? { ...q, index: q.index + 1 } : q)),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkQueue]);
 
   const openPreview = (inv) => {
     setCurrent(JSON.parse(JSON.stringify(inv)));
@@ -418,6 +471,7 @@ export default function InvoiceApp({ session }) {
           onDuplicate={duplicateExisting}
           onDelete={deleteInvoice}
           onOpenPdf={(inv) => handlePrint(inv)}
+          onDownloadAllPending={startBulkDownload}
           netTotal={netTotal}
           grandTotal={grandTotal}
         />
@@ -452,6 +506,7 @@ export default function InvoiceApp({ session }) {
           onBack={() => setView("edit")}
           onPrint={() => handlePrint(current)}
           printRef={printRef}
+          bulkProgress={bulkQueue ? { current: bulkQueue.index + 1, total: bulkQueue.ids.length } : null}
         />
       )}
 
@@ -491,10 +546,21 @@ function TopBar({ view, onList, onExport, canExport, saveState, userEmail }) {
   );
 }
 
-function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf, netTotal, grandTotal }) {
+function InvoiceList({
+  invoices,
+  onNew,
+  onEdit,
+  onDuplicate,
+  onDelete,
+  onOpenPdf,
+  onDownloadAllPending,
+  netTotal,
+  grandTotal,
+}) {
   const [query, setQuery] = useState("");
+  const [downloadFilter, setDownloadFilter] = useState("all"); // all | pending | downloaded
   const norm = (s) => (s || "").toString().toLowerCase().replace(/^gi[/]?/i, "").trim();
-  const filtered = invoices.filter((i) => {
+  const searched = invoices.filter((i) => {
     const q = norm(query);
     if (!q) return true;
     return (
@@ -504,6 +570,12 @@ function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf
       (i.siteAddressLine1 || "").toLowerCase().includes(query.toLowerCase())
     );
   });
+  const filtered = searched.filter((i) => {
+    if (downloadFilter === "pending") return !i.downloaded;
+    if (downloadFilter === "downloaded") return !!i.downloaded;
+    return true;
+  });
+  const pendingInFilter = filtered.filter((i) => !i.downloaded);
   const exactNumberMatch = invoices.find(
     (i) => norm(i.invoiceNumber) === norm(query) && norm(query) !== ""
   );
@@ -522,7 +594,7 @@ function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf
         </button>
       </div>
 
-      <div style={{ position: "relative", marginBottom: 16 }}>
+      <div style={{ position: "relative", marginBottom: 12 }}>
         <input
           style={styles.searchInput}
           placeholder="Search by invoice number (e.g. 2631), customer, or site address…"
@@ -539,6 +611,35 @@ function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf
         )}
       </div>
 
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {[
+            { key: "all", label: "All" },
+            { key: "pending", label: "Not downloaded" },
+            { key: "downloaded", label: "Downloaded" },
+          ].map((opt) => (
+            <button
+              key={opt.key}
+              onClick={() => setDownloadFilter(opt.key)}
+              style={{
+                ...styles.smallBtn,
+                ...(downloadFilter === opt.key ? styles.smallBtnActive : {}),
+              }}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        {pendingInFilter.length > 0 && (
+          <button
+            style={styles.smallBtnAccent}
+            onClick={() => onDownloadAllPending(pendingInFilter)}
+          >
+            Download all not downloaded ({pendingInFilter.length})
+          </button>
+        )}
+      </div>
+
       {filtered.length === 0 && (
         <div style={styles.emptyState}>
           <div style={{ fontSize: 15, color: "#374151", marginBottom: 6, fontWeight: 600 }}>
@@ -547,7 +648,7 @@ function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf
           <div style={{ color: "#9ca3af", fontSize: 13.5 }}>
             {invoices.length === 0
               ? "Create your first invoice to get started."
-              : "Try a different search."}
+              : "Try a different search or filter."}
           </div>
         </div>
       )}
@@ -580,6 +681,17 @@ function InvoiceList({ invoices, onNew, onEdit, onDuplicate, onDelete, onOpenPdf
                 }}
               >
                 {inv.xeroStatus === "sent" ? "In Xero" : "Not sent"}
+              </span>
+            </div>
+            <div style={{ width: 108 }}>
+              <span
+                style={{
+                  ...styles.statusPill,
+                  ...(inv.downloaded ? styles.pillGreen : styles.pillGrey),
+                }}
+                title={inv.downloadedAt ? `Downloaded ${todayLong(inv.downloadedAt.slice(0, 10))}` : ""}
+              >
+                {inv.downloaded ? "Downloaded" : "Not downloaded"}
               </span>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -1042,20 +1154,29 @@ function InvoiceEditor({
   );
 }
 
-function PreviewScreen({ inv, netTotal, vatAmount, grandTotal, onBack, onPrint }) {
+function PreviewScreen({ inv, netTotal, vatAmount, grandTotal, onBack, onPrint, bulkProgress }) {
   return (
     <div style={styles.previewOuter}>
       <div style={styles.previewToolbar} className="no-print">
-        <button style={styles.ghostBtn} onClick={onBack}>
+        <button style={styles.ghostBtn} onClick={onBack} disabled={!!bulkProgress}>
           ← Back to edit
         </button>
-        <button style={styles.primaryBtn} onClick={onPrint}>
-          Save as PDF
-        </button>
+        {!bulkProgress && (
+          <button style={styles.primaryBtn} onClick={onPrint}>
+            Save as PDF
+          </button>
+        )}
       </div>
-      <div style={styles.previewHint} className="no-print">
-        In the print dialog, set "Destination" to <strong>Save as PDF</strong>, then Save.
-      </div>
+      {bulkProgress ? (
+        <div style={styles.previewHint} className="no-print">
+          Downloading invoice {bulkProgress.current} of {bulkProgress.total} — set "Destination" to{" "}
+          <strong>Save as PDF</strong> and Save. The next invoice opens automatically once this dialog closes.
+        </div>
+      ) : (
+        <div style={styles.previewHint} className="no-print">
+          In the print dialog, set "Destination" to <strong>Save as PDF</strong>, then Save.
+        </div>
+      )}
 
       <div style={styles.sheet} id="invoice-sheet">
         <table style={styles.docTable} cellPadding={0} cellSpacing={0}>
@@ -1343,6 +1464,11 @@ const styles = {
     fontSize: 12.5,
     fontWeight: 600,
     cursor: "pointer",
+  },
+  smallBtnActive: {
+    background: "#2f6fed",
+    color: "#ffffff",
+    border: "1px solid #2f6fed",
   },
   smallBtnAccent: {
     background: "#eef2ff",
